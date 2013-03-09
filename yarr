@@ -1,0 +1,333 @@
+#!/usr/bin/env python
+
+import sys
+import re
+#import commands
+import time
+import os
+import socket
+#import paramiko
+import subprocess
+
+import tempfile
+import ConfigParser
+from pyPgSQL import PgSQL
+
+from threading import Thread,Lock,activeCount
+
+
+global config
+global dbsettings
+dbconn = None
+stdin = subprocess.PIPE
+
+
+def expand_group(gname):
+	if dbconn:
+		cu = dbconn.cursor()
+		cu.execute("set client_encoding to unicode")
+		query = config.get("hosts","group_query") % gname
+		cu.execute(query)
+		hosts = cu.fetchall()
+		if not hosts:
+				gexec = config.get("hosts","groups")
+				gexec = "groups = {%s}" % gexec
+				exec gexec
+				if groups.has_key(gname):
+						hosts = [ (gn, None) for gn in groups[gname] ]
+
+		return [normal_hostname(l[0]) for l in hosts]
+	else:
+		gexec = config.get("hosts","groups")
+		gexec = "groups = {%s}" % gexec
+		exec gexec
+
+		return groups[gname]
+
+def listgroups():
+	exec "confgroups = {" + config.get("hosts","groups").strip() + "}"
+	if dbconn:
+		cu = dbconn.cursor()
+		cu.execute("set client_encoding to unicode")
+		query = config.get("hosts","listgroups_query")
+		cu.execute(query)
+		gl = [l[0] for l in cu.fetchall()]
+		gl.extend(confgroups.keys())
+		gl = list(set(gl))
+		gl.sort()
+		return gl
+	else:
+		return confgroups.keys()
+
+def normal_hostname(host):
+	RE=re.compile(".*\.%s" % config.get("hosts","normalize_to"))
+	if not RE.match(host):
+		return "%s.%s" % (host, config.get("hosts","normalize_to"))
+	return host
+
+
+def parse_args(args):
+	hosts = []
+	exhosts = []
+	exgroups = []
+	hgroups = []
+	command = []
+	root = h = hg = eh = par = None
+
+	args.pop(0)
+
+	for arg in args:
+	  try:
+		  hosts.append(re.compile('^\+(.*)').findall(arg)[0])
+		  continue
+	  except IndexError:
+		  pass
+
+	  try:
+		  hgroups.append(re.compile('^@(.*)').findall(arg)[0])
+		  continue
+	  except IndexError:
+		  pass
+
+	  try:
+		  exgroups.append(re.compile('^-@(.*)').findall(arg)[0])
+		  continue
+	  except IndexError:
+		  pass
+
+	  try:
+		  exhosts.append(normal_hostname(re.compile('^-(.*)').findall(arg)[0]))
+		  continue
+	  except IndexError:
+		  pass
+
+	  try:
+		  par=re.compile('^/$').findall(arg)[0]
+		  continue
+	  except IndexError:
+		  pass
+
+	  try:
+		  root=re.compile('^=$').findall(arg)[0]
+		  continue
+	  except IndexError:
+		  pass
+
+	  try:
+		  command.append(re.compile('^[^\+@=-].*').findall(arg)[0])
+	  except IndexError:
+		  pass
+
+	hostset = set(hosts)
+	exhostset = set(exhosts)
+	hostset.update(*[set(expand_group(hg)) for hg in hgroups])
+	exhostset.update(*[set(expand_group(ehg)) for ehg in exgroups])
+	hostset.difference_update(exhostset)
+	if config.has_option("hosts", "autoexclude"):
+			hostset.difference_update(set(expand_group(config.get("hosts", "autoexclude"))))
+
+	return list(hostset),par,root,command
+
+def timer(sleep):
+	for i in range(int(sleep),0,-1):
+		sys.stdout.flush()
+		sys.stdout.write((10*" ")+str(i)+(5*" "))
+		sys.stdout.flush()
+		time.sleep(1)
+		sys.stdout.flush()
+		sys.stdout.write('\b'*(15+len(str(i))))
+		sys.stdout.flush()
+
+
+
+def ssh_cmd(host, command, lock=None, action="exec", 
+		target=None, dest="/tmp"):
+		#if lock: lock.acquire()
+		#if lock: lock.release()
+		no_stdin = ""
+		if config.has_option("ssh", "no_stdin") and config.get("ssh","no_stdin"):
+				stdin = None
+				no_stdin = " -n"
+				no_stdin = ""
+
+		if action == "exec":
+			cmd="ssh %s -p %s -o ConnectTimeout=%s %s@%s \"%s\"" % \
+					(
+							no_stdin,
+							config.get("ssh","port"),
+							int(config.get("ssh","conn_timeout")),
+							config.get("ssh","username"),
+							host,
+							command,
+							)
+		elif action == "put":
+			if dest == None:
+					dest = os.path.dirname(target)
+			cmd="scp %s -P %s -o ConnectTimeout=%s %s %s@%s:%s" % \
+					(
+							no_stdin,
+							config.get("ssh","port"),
+							int(config.get("ssh","conn_timeout"))*5,
+							target,
+							config.get("ssh","username"),
+							host,
+							dest,
+							)
+
+		p = subprocess.Popen(cmd, shell=True, 
+					   bufsize=-1,
+					   stdin=stdin,
+					   stdout=subprocess.PIPE,
+					   stderr=subprocess.PIPE,
+					   close_fds=True)
+
+		stdin,stdout,stderr = (p.stdin,p.stdout,p.stderr)
+		retcode = p.wait()
+		if retcode:
+				sys.stdout.write("%s:\tret:\t%s\n" % (host, retcode))
+		if stdout:
+			if action == "put":
+				if lock: lock.acquire()
+				sys.stdout.write("%s:\tyr:\tput %s to remote %s\n" %
+						(host, target, dest))
+				sys.stdout.flush()
+				if lock: lock.release()
+			while True:
+				line=stdout.readline() 
+				if not line:
+					break
+				sys.stdout.write("%s:\tout:\t%s" % (host, line))
+				sys.stdout.flush()
+		if stderr:
+			while True:
+				line=stderr.readline() 
+				if not line:
+					break
+				sys.stdout.write("%s:\terr:\t%s" % (host, line))
+				sys.stdout.flush()
+
+class HostThread(Thread):
+	def __init__(self, com_list, host, lock):
+		Thread.__init__(self)
+		self.lock=lock
+		self.com_list=com_list
+		self.host=host
+	def run(self):
+		#self.lock.acquire()
+		#self.lock.release()
+		for c in self.com_list:
+			c(self.host)
+			if len(self.com_list) > 1: time.sleep(1)
+		return True
+
+def check_set_default(section,name,value):
+	try:
+		config.get(section, name)
+	except ConfigParser.NoOptionError:
+		config.set(section, name, value)
+	return True
+
+def main():
+	thrds=[]
+
+	lock = Lock()
+	global config
+	config = ConfigParser.ConfigParser()
+	selfname = os.path.basename(sys.argv[0])
+	config.read("%s/.%s/%s.conf" % (
+		os.getenv("HOME").rstrip("/"),
+		selfname,
+		selfname,
+		))
+
+	check_set_default("ssh","port", "22")
+	check_set_default("ssh","conn_timeout", "1")
+	check_set_default("ssh","username",os.getlogin())
+	if config.has_option("hosts", "source"):
+		match = re.match(
+				"(.*)://(.*)@(.*):([0-9]*)/(.*)",
+				config.get("hosts","source"))
+		dbtype, dbuser, dbhost, dbport, dbname =  match.groups()
+		dbsettings = {
+				"user": dbuser,
+				"host": dbhost,
+				"port": dbport,
+				"database": dbname,
+				"client_encoding": "utf-8",
+				"unicode_results": 1,
+				}
+
+		global dbconn
+		dbconn = PgSQL.connect(**dbsettings)
+
+	hosts,par,root,command = parse_args(sys.argv)
+
+	if root:
+		check_set_default("ssh","username","root")
+
+
+	editor=os.getenv("EDITOR")
+
+
+	if command[0] == "list": 
+		for host in hosts:
+			print normal_hostname(host)
+
+		sys.exit(0)
+
+	if command[0] in ["listgroups", "groups", "grouplist"]: 
+		print " ".join(listgroups())
+		sys.exit(0)
+
+	com_list=[]
+
+	if command[0] == "put":
+		dst = None
+		if len(command)>2:
+				dst = command[2]
+		com_list.append(lambda h: ssh_cmd(h, None, lock,
+			command[0], command[1], dst))
+	elif command[0] == "putexec":
+		dest = tempfile.mktemp(suffix='yte',dir="/tmp")
+		com_list.append(lambda h: ssh_cmd(h, None, lock, 
+			"put", command[1], dest))
+		com_list.append(lambda h: ssh_cmd(h, dest, lock))
+		com_list.append(lambda h: ssh_cmd(h, "rm %s" %
+			dest, lock))
+	elif command[0] == "vim":
+		dest = tempfile.mktemp(suffix='yte',dir="/tmp")
+		p = subprocess.Popen(editor+" "+dest, shell=True)
+		pid, sts = os.waitpid(p.pid, 0)
+		if sts == 0:
+			os.chmod(dest,493)
+			com_list.append(lambda h: ssh_cmd(h, None, lock, 
+				"put", dest, dest))
+			com_list.append(lambda h: ssh_cmd(h, dest, lock))
+			com_list.append(lambda h: ssh_cmd(h, "rm %s" %
+				dest, lock))
+
+	else:
+		com_list.append(lambda h: ssh_cmd(h, command[0],
+			lock))
+
+	for host in hosts:
+
+		if par:
+			if activeCount() > config.get("ssh","max_paralels"):
+				time.sleep(1)
+			thrds.append(HostThread(com_list,host,lock))
+			thrds[len(thrds)-1].start()
+		else:
+			for c in com_list:
+				c(host)
+				#if len(com_list) > 1: time.sleep(1)
+
+
+if __name__ == '__main__':
+	#import cProfile
+	#cProfile.run('main()', 'mainstat')
+	#global config
+	#parse_conf(readconf("/home/dindin/.tyr/tyr.conf"))	
+	main()
+#	import pstats
+#	p = pstats.Stats('mainstat')
