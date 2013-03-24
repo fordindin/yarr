@@ -68,8 +68,9 @@ def listgroups():
 		return confgroups.keys()
 
 def normal_hostname(host):
+	pd = config.get("hosts","possible_domains")
 	RE=re.compile(".*\.%s" % config.get("hosts","normalize_to"))
-	if not RE.match(host):
+	if not RE.match(host) and len(filter(lambda a: host.endswith(a), pd)) == 0:
 		return "%s.%s" % (host, config.get("hosts","normalize_to"))
 	return host
 
