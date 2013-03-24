@@ -9,7 +9,6 @@ import subprocess
 
 import tempfile
 import ConfigParser
-from pyPgSQL import PgSQL
 
 from threading import Thread,Lock,activeCount
 import signal
@@ -282,7 +281,10 @@ def main():
 				}
 
 		global dbconn
-		dbconn = PgSQL.connect(**dbsettings)
+		dbconn = None
+		if dbtype == 'pgsql':
+				from pyPgSQL import PgSQL
+				dbconn = PgSQL.connect(**dbsettings)
 
 	hosts,par,root,command = parse_args(sys.argv)
 	if par and par[1]:
