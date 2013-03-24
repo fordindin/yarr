@@ -15,8 +15,13 @@ from threading import Thread,Lock,activeCount
 import signal
 
 def handleSigTERM():
+		pass
+		"""
 		for p in pidlist:
+				print "Killing %s" % p
 				os.kill(p, 15)
+		sys.exit(1)
+		"""
 signal.signal(signal.SIGTERM, handleSigTERM)
 
 global config
@@ -149,6 +154,7 @@ def ssh_cmd(host, command, lock=None, action="exec",
 		#if lock: lock.acquire()
 		#if lock: lock.release()
 		no_stdin = ""
+		timecount = config.get("yarr", "timecount")
 		if config.has_option("ssh", "no_stdin") and config.get("ssh","no_stdin"):
 				stdin = None
 				no_stdin = " -n"
@@ -185,10 +191,21 @@ def ssh_cmd(host, command, lock=None, action="exec",
 					   stderr=subprocess.PIPE,
 					   close_fds=True)
 
+		if timecount:
+				time_start = time.time()
+				sys.stdout.write("%s:\tyr:\tstarted at %s\n" %
+								(host, time_start))
+				sys.stdout.flush()
 		stdin,stdout,stderr = (p.stdin,p.stdout,p.stderr)
-		pid = p.pid
-		pidlist.append(pid)
+		#pid = p.pid
+		#pidlist.append(pid)
 		retcode = p.wait()
+		if timecount:
+				time_spent = time.time() - time_start
+				sys.stdout.write("%s:\tyr:\tspent: %s\n" %
+								(host, time_spent))
+				sys.stdout.flush()
+		stdin,stdout,stderr = (p.stdin,p.stdout,p.stderr)
 		if retcode:
 				sys.stdout.write("%s:\tret:\t%s\n" % (host, retcode))
 		if stdout:
@@ -211,7 +228,7 @@ def ssh_cmd(host, command, lock=None, action="exec",
 					break
 				sys.stdout.write("%s:\terr:\t%s" % (host, line))
 				sys.stdout.flush()
-		pidlist.remove(pid)
+		#pidlist.remove(pid)
 
 class HostThread(Thread):
 	def __init__(self, com_list, host, lock):
@@ -337,5 +354,8 @@ if __name__ == '__main__':
 	#global config
 	#parse_conf(readconf("/home/dindin/.tyr/tyr.conf"))	
 	main()
+	#try:
+	#except KeyboardInterrupt:
+	#		handleSigTERM()
 #	import pstats
 #	p = pstats.Stats('mainstat')
