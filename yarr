@@ -30,7 +30,6 @@ dbconn = None
 stdin = subprocess.PIPE
 pidlist = []
 
-
 def expand_group(gname):
 	if dbconn:
 		cu = dbconn.cursor()
@@ -82,8 +81,12 @@ def parse_args(args):
 	hgroups = []
 	command = []
 	root = h = hg = eh = par = None
+	nostat = 'False'
 
 	args.pop(0)
+	if '-nostat' in args:
+			args.pop(args.index('-nostat'))
+			nostat = 'True'
 
 	for arg in args:
 		try:
@@ -135,6 +138,7 @@ def parse_args(args):
 	if config.has_option("hosts", "autoexclude"):
 			hostset.difference_update(set(expand_group(config.get("hosts", "autoexclude"))))
 
+	config.set("yarr", "nostat", nostat)
 	return list(hostset),par,root,command
 
 def timer(sleep):
@@ -193,18 +197,20 @@ def ssh_cmd(host, command, lock=None, action="exec",
 
 		if timecount:
 				time_start = time.time()
-				sys.stdout.write("%s:\tyr:\tstarted at %s\n" %
-								(host, time_start))
-				sys.stdout.flush()
+				if not bool(config.get("yarr","nostat")):
+						sys.stdout.write("%s:\tyr:\tstarted at %s\n" %
+										(host, time_start))
+						sys.stdout.flush()
 		stdin,stdout,stderr = (p.stdin,p.stdout,p.stderr)
 		#pid = p.pid
 		#pidlist.append(pid)
 		retcode = p.wait()
 		if timecount:
 				time_spent = time.time() - time_start
-				sys.stdout.write("%s:\tyr:\tspent: %s\n" %
-								(host, time_spent))
-				sys.stdout.flush()
+				if not bool(config.get("yarr","nostat")):
+						sys.stdout.write("%s:\tyr:\tspent: %s\n" %
+										(host, time_spent))
+						sys.stdout.flush()
 		stdin,stdout,stderr = (p.stdin,p.stdout,p.stderr)
 		if retcode:
 				sys.stdout.write("%s:\tret:\t%s\n" % (host, retcode))
